@@ -1,0 +1,45 @@
+.git
+.gitignore
+
+# Raw IDAT input files
+idat_EPICv2/
+idat_MSA/
+*.idat
+*.idat.gz
+
+# Generated IDAT batches
+idat_batches_EPICv2/
+idat_batches_MSA/
+
+# Analysis outputs
+results/
+results_grimagev1/
+postprocess/
+clock_compare_outputs_grimagev1/
+
+# Large manifest files
+manifest/*.csv
+
+# sesame / ExperimentHub cache
+vendor/
+vendor/sesame_cache/
+
+# Python cache and virtual environments
+__pycache__/
+*.py[cod]
+.venv/
+.venv_postprocess/
+
+# Backup/temp files
+*.bak
+*.bak.*
+*.tmp
+
+# R local files
+.Rhistory
+.RData
+.Rproj.user/
+
+# Logs and macOS
+*.log
+.DS_Store

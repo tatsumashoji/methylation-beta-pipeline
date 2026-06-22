@@ -1,0 +1,72 @@
+# =========================
+# Raw IDAT input files
+# =========================
+idat_EPICv2/
+idat_MSA/
+*.idat
+*.idat.gz
+
+# =========================
+# Generated IDAT batches
+# =========================
+idat_batches_EPICv2/
+idat_batches_MSA/
+
+# =========================
+# Analysis outputs
+# =========================
+results/
+results_grimagev1/
+postprocess/
+clock_compare_outputs_grimagev1/
+
+
+# =========================
+# Large manifest files
+# Shared separately via Google Drive
+# =========================
+manifest/*.csv
+
+# =========================
+# sesame / ExperimentHub cache
+# Shared separately via Google Drive
+# =========================
+vendor/
+vendor/sesame_cache/
+
+# =========================
+# Python cache and virtual environments
+# =========================
+__pycache__/
+*.py[cod]
+.venv/
+.venv_postprocess/
+
+# =========================
+# Backup/temp files
+# =========================
+*.bak
+*.bak.*
+*.tmp
+
+# =========================
+# R local files
+# =========================
+.Rhistory
+.RData
+.Rproj.user/
+
+# =========================
+# Logs
+# =========================
+*.log
+
+# =========================
+# macOS
+# =========================
+.DS_Store
+
+# =========================
+# Optional local config
+# =========================
+utils/config.toml
