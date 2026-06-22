@@ -1,0 +1,43 @@
+name: methylation-beta-pipeline
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python=3.11
+  - pip
+  - r-base=4.5
+
+  - bioconductor-sesame=1.28.1
+  - bioconductor-sesamedata=1.28.0
+  - bioconductor-biocparallel
+  - bioconductor-experimenthub
+  - bioconductor-biocfilecache
+
+  - r-logger
+  - r-data.table
+  - r-dplyr
+  - r-magrittr
+  - r-this.path
+  - r-tidyr
+  - r-rcpptoml
+  - r-tidyverse
+  - r-ggplot2
+  - r-knitr
+  - r-gridextra
+  - r-cowplot
+  - r-broom
+  - r-scales
+
+  - pandas
+  - numpy
+  - scipy
+  - scikit-learn
+  - threadpoolctl
+  - matplotlib
+  - seaborn
+  - openpyxl
+  - tqdm
+
+  - pip:
+      - biolearn==0.9.1
+      - torch==2.5.1

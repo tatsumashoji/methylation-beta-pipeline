@@ -1,4 +1,4 @@
-FROM bioconductor/bioconductor_docker:RELEASE_3_23
+FROM --platform=linux/amd64 condaforge/miniforge3:latest
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=Asia/Tokyo
@@ -7,72 +7,50 @@ ENV LC_ALL=C.UTF-8
 
 WORKDIR /opt/pipeline
 
+# Minimal OS packages
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
     git \
-    python3 \
-    python3-pip \
-    python3-venv \
-    libcurl4-openssl-dev \
-    libssl-dev \
-    libxml2-dev \
-    zlib1g-dev \
-    libbz2-dev \
-    liblzma-dev \
+    bash \
     && rm -rf /var/lib/apt/lists/*
 
-# R packages: SeSAMe + final R analysis script dependencies.
-RUN R -q -e '\
-options(timeout = 1200); \
-options(download.file.method = "libcurl"); \
-options(repos = c(CRAN = "https://cloud.r-project.org")); \
-BiocManager::install( \
-  c("sesame", "sesameData", "BiocParallel", "ExperimentHub"), \
-  ask = FALSE, update = FALSE \
-); \
-install.packages( \
-  c( \
-    "logger", "data.table", "dplyr", "magrittr", "this.path", "tidyr", "RcppTOML", \
-    "tidyverse", "ggplot2", "knitr", "gridExtra", "cowplot", "broom", "scales" \
-  ), \
-  repos = "https://cloud.r-project.org" \
-); \
-'
+# Copy dependency definitions
+COPY environment.yml /opt/pipeline/environment.yml
+COPY conda-lock.yml /opt/pipeline/conda-lock.yml
 
-# Python environment for post-processing and Biolearn.
-RUN python3 -m venv /opt/venv
-ENV PATH="/opt/venv/bin:${PATH}"
+# Create the locked conda environment
+RUN conda install -y -n base -c conda-forge conda-lock && \
+    conda-lock install --name methylation-beta-pipeline /opt/pipeline/conda-lock.yml && \
+    conda clean -afy
 
-RUN pip install --upgrade pip setuptools wheel && \
-    pip install pandas numpy scipy scikit-learn threadpoolctl matplotlib seaborn biolearn && \
-    pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision torchaudio
+# Use the locked environment by default
+ENV PATH="/opt/conda/bin:/opt/conda/envs/methylation-beta-pipeline/bin:${PATH}"
 
+# Copy only code and lightweight files into the image.
+# Large manifest CSV files and sesame_cache are mounted at runtime from /work.
+COPY bin/ /opt/pipeline/bin/
 COPY scripts/ /opt/pipeline/scripts/
 COPY scripts_postprocess/ /opt/pipeline/scripts_postprocess/
-COPY bin/ /opt/pipeline/bin/
-COPY manifest/ /opt/pipeline/manifest/
-COPY vendor/sesame_cache/ /opt/sesame_cache/
-
-ENV EXPERIMENT_HUB_CACHE=/opt/sesame_cache
+COPY templates/ /opt/pipeline/templates/
+COPY README.md /opt/pipeline/README.md
 
 RUN chmod +x /opt/pipeline/bin/* || true && \
     chmod +x /opt/pipeline/scripts_postprocess/*.py || true
 
-# Check SeSAMe cache.
-RUN R -q -e '\
-suppressPackageStartupMessages({library(ExperimentHub); library(sesameData)}); \
-ExperimentHub::setExperimentHubOption("CACHE", "/opt/sesame_cache"); \
-for (title in c("idatSignature", "MSA.address", "KYCG.MSA.Mask.20260122")) { \
-  cat("Checking sesameData cache:", title, "\n"); \
-  sesameData::sesameDataGet(title); \
-}; \
-cat("SeSAMe cache check OK\n"); \
-'
+# Runtime resource paths.
+# The repository root is mounted to /work at docker run time.
+ENV EXPERIMENT_HUB_CACHE=/work/vendor/sesame_cache
 
-# Check Python/Biolearn.
-RUN python - <<'PY'
-import pandas, numpy, sklearn, seaborn, torch
+# Sanity checks for package availability
+RUN /opt/conda/envs/methylation-beta-pipeline/bin/Rscript -e 'suppressPackageStartupMessages({library(sesame); library(sesameData); library(ExperimentHub); library(data.table); library(dplyr); library(RcppTOML); library(this.path)}); cat("R package check OK\n")'
+
+RUN /opt/conda/envs/methylation-beta-pipeline/bin/python - <<'PY'
+import pandas
+import numpy
+import scipy
+import sklearn
+import seaborn
 from biolearn.data_library import GeoData
 from biolearn.model_gallery import ModelGallery
 print("Python/Biolearn check OK")

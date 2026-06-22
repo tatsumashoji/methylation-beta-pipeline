@@ -136,7 +136,9 @@ mkdir -p results postprocess results_grimagev1 clock_compare_outputs_grimagev1
 Build the Docker image:
 
 ```bash
-docker build -t methylation-beta-pipeline .
+docker build \
+  --platform linux/amd64 \
+  -t methylation-idat-pipeline:grimagev1-biolearn-default .
 ```
 
 ---
@@ -148,10 +150,11 @@ To run the full pipeline, use:
 ```bash
 docker run --rm \
   --platform linux/amd64 \
+  -e EXPERIMENT_HUB_CACHE=/work/vendor/sesame_cache \
   -v "$PWD":/work \
   -w /work \
   methylation-idat-pipeline:grimagev1-biolearn-default \
-  /opt/pipeline/bin/run_all_pipeline.sh
+  /work/bin/run_all_pipeline.sh
 ```
 
 ---
