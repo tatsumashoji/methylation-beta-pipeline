@@ -172,6 +172,12 @@ docker run --rm \
   --platform linux/amd64 \
   -e EXPERIMENT_HUB_CACHE=/work/vendor/sesame_cache \
   -e BFC_CACHE=/work/vendor/sesame_cache \
+  -e OMP_NUM_THREADS=1 \
+  -e OPENBLAS_NUM_THREADS=1 \
+  -e MKL_NUM_THREADS=1 \
+  -e VECLIB_MAXIMUM_THREADS=1 \
+  -e NUMEXPR_NUM_THREADS=1 \
+  -e RCPP_PARALLEL_NUM_THREADS=1 \
   -v "$PWD":/work \
   -w /work \
   methylation-idat-pipeline:grimagev1-biolearn-default \
@@ -206,6 +212,128 @@ clock_compare_outputs_grimagev1/
 
 ---
 
+## To make beta tables only
+
+Both EPICv2 and MSA:
+
+```text
+docker run --rm \
+  --platform linux/amd64 \
+  -e EXPERIMENT_HUB_CACHE=/work/vendor/sesame_cache \
+  -e BFC_CACHE=/work/vendor/sesame_cache \
+  -e SESAME_CACHE=/work/vendor/sesame_cache \
+  -e MANIFEST_DIR=/work/manifest \
+  -e OMP_NUM_THREADS=1 \
+  -e OPENBLAS_NUM_THREADS=1 \
+  -e MKL_NUM_THREADS=1 \
+  -e VECLIB_MAXIMUM_THREADS=1 \
+  -e NUMEXPR_NUM_THREADS=1 \
+  -e RCPP_PARALLEL_NUM_THREADS=1 \
+  -v "$PWD":/work \
+  -w /work \
+  methylation-idat-pipeline:grimagev1-biolearn-default \
+  -lc '
+    set -euo pipefail
+
+    echo "========================================"
+    echo "Create IDAT batches"
+    echo "========================================"
+    /opt/conda/envs/methylation-beta-pipeline/bin/python /work/bin/make_idat_batches.py
+
+    echo "========================================"
+    echo "EPICv2: SeSAMe IDAT to per-batch collapsed beta"
+    echo "========================================"
+    /work/bin/run_sesame_batches_in_container.sh EPICv2
+
+    echo "========================================"
+    echo "MSA: SeSAMe IDAT to per-batch collapsed beta"
+    echo "========================================"
+    /work/bin/run_sesame_batches_in_container.sh MSA
+
+    echo "========================================"
+    echo "Combine collapsed beta matrices"
+    echo "========================================"
+    /opt/conda/envs/methylation-beta-pipeline/bin/python /work/scripts_postprocess/prepare_collapsed_beta.py
+  '
+```
+
+EPICv2 only:
+
+```text
+docker run --rm \
+  --platform linux/amd64 \
+  -e EXPERIMENT_HUB_CACHE=/work/vendor/sesame_cache \
+  -e BFC_CACHE=/work/vendor/sesame_cache \
+  -e SESAME_CACHE=/work/vendor/sesame_cache \
+  -e MANIFEST_DIR=/work/manifest \
+  -e OMP_NUM_THREADS=1 \
+  -e OPENBLAS_NUM_THREADS=1 \
+  -e MKL_NUM_THREADS=1 \
+  -e VECLIB_MAXIMUM_THREADS=1 \
+  -e NUMEXPR_NUM_THREADS=1 \
+  -e RCPP_PARALLEL_NUM_THREADS=1 \
+  -v "$PWD":/work \
+  -w /work \
+  methylation-idat-pipeline:grimagev1-biolearn-default \
+  -lc '
+    set -euo pipefail
+
+    echo "========================================"
+    echo "Create IDAT batches"
+    echo "========================================"
+    /opt/conda/envs/methylation-beta-pipeline/bin/python /work/bin/make_idat_batches.py
+
+    echo "========================================"
+    echo "EPICv2: SeSAMe IDAT to per-batch collapsed beta"
+    echo "========================================"
+    /work/bin/run_sesame_batches_in_container.sh EPICv2
+
+    echo "========================================"
+    echo "Combine collapsed beta matrices"
+    echo "========================================"
+    /opt/conda/envs/methylation-beta-pipeline/bin/python /work/scripts_postprocess/prepare_collapsed_beta.py
+  '
+```
+
+MSA only:
+
+```text
+docker run --rm \
+  --platform linux/amd64 \
+  -e EXPERIMENT_HUB_CACHE=/work/vendor/sesame_cache \
+  -e BFC_CACHE=/work/vendor/sesame_cache \
+  -e SESAME_CACHE=/work/vendor/sesame_cache \
+  -e MANIFEST_DIR=/work/manifest \
+  -e OMP_NUM_THREADS=1 \
+  -e OPENBLAS_NUM_THREADS=1 \
+  -e MKL_NUM_THREADS=1 \
+  -e VECLIB_MAXIMUM_THREADS=1 \
+  -e NUMEXPR_NUM_THREADS=1 \
+  -e RCPP_PARALLEL_NUM_THREADS=1 \
+  -v "$PWD":/work \
+  -w /work \
+  methylation-idat-pipeline:grimagev1-biolearn-default \
+  -lc '
+    set -euo pipefail
+
+    echo "========================================"
+    echo "Create IDAT batches"
+    echo "========================================"
+    /opt/conda/envs/methylation-beta-pipeline/bin/python /work/bin/make_idat_batches.py
+
+    echo "========================================"
+    echo "MSA: SeSAMe IDAT to per-batch collapsed beta"
+    echo "========================================"
+    /work/bin/run_sesame_batches_in_container.sh MSA
+
+    echo "========================================"
+    echo "Combine collapsed beta matrices"
+    echo "========================================"
+    /opt/conda/envs/methylation-beta-pipeline/bin/python /work/scripts_postprocess/prepare_collapsed_beta.py
+  '
+```
+---
+
 ## Important notes
 
 * `vendor/sesame_cache/` is required for reproducibility and stable execution.
@@ -218,4 +346,3 @@ clock_compare_outputs_grimagev1/
 ```bash
 -e EXPERIMENT_HUB_CACHE=/work/vendor/sesame_cache
 ```
-

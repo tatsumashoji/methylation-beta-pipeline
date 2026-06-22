@@ -1,9 +1,22 @@
 #!/usr/bin/env bash
+
+# --- Force serial execution in Docker to avoid pthread_create / BiocParallel errors ---
+export OMP_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export VECLIB_MAXIMUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
+export RCPP_PARALLEL_NUM_THREADS=1
+export THREADS=1
+export N_THREADS=1
+export NUM_THREADS=1
+# --- End serial execution patch ---
+
 set -euo pipefail
 
 DATASET="${1:?Usage: run_sesame_batches_in_container.sh EPICv2|MSA}"
 
-THREADS="${THREADS:-1}"
+THREADS=1
 PVAL_THRESHOLD="${PVAL_THRESHOLD:-0.05}"
 SESAME_CACHE="${SESAME_CACHE:-/work/vendor/sesame_cache}"
 
@@ -64,7 +77,7 @@ do
     --array_type "${ARRAY_TYPE}" \
     --manifest_file "${MANIFEST_FILE}" \
     --pval_threshold "${PVAL_THRESHOLD}" \
-    --threads "${THREADS}" \
+    --threads 1 \
     --sesame_data "${SESAME_CACHE}" \
     --skip_annotation true \
     2>&1 | tee "${LOG}"

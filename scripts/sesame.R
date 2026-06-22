@@ -1,3 +1,8 @@
+# --- Force BiocParallel serial execution in Docker ---
+suppressPackageStartupMessages(library(BiocParallel))
+BiocParallel::register(BiocParallel::SerialParam(), default = TRUE)
+# --- End BiocParallel serial execution patch ---
+
 #!/usr/bin/env Rscript
 
 # Description: Script for generating beta-value matrices from IDAT files using SeSAMe
@@ -30,7 +35,7 @@ main <- function(){
 
     args <- commandArgs(trailingOnly=T)
     # default values
-    threads <- 8
+    threads <- 1
     pval_threshold <- 0.05
     array_type <- "EPICv2"
     manifest_file <- NULL
@@ -50,7 +55,7 @@ main <- function(){
         } else if (arg == "--pval_threshold") {
             pval_threshold <- as.numeric(args[i+1])
         } else if (arg == "--threads") {
-            threads <- as.integer(args[i+1])
+            threads <- 1
         } else if (arg == "--array_type") {
             array_type <- args[i+1]
         } else if (arg == "--sesame_data") {
@@ -71,12 +76,7 @@ main <- function(){
     if (threads <= 1) {
         bp <- BiocParallel::SerialParam()
     } else {
-        bp <- BiocParallel::SnowParam(
-            workers = threads,
-            type = "SOCK",
-            progressbar = FALSE,
-            stop.on.error = TRUE
-        )
+        bp <- BiocParallel::SerialParam()
     }
 
     # Specify the directory where sesameDataCache is stored
