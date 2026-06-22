@@ -67,7 +67,7 @@ if [ "${RUN_EPICV2}" = "1" ]; then
   echo "EPICv2: combine collapsed beta matrices"
   echo "========================================"
 
-  python /opt/pipeline/scripts_postprocess/prepare_collapsed_beta.py \
+  /opt/conda/envs/methylation-beta-pipeline/bin/python /opt/pipeline/scripts_postprocess/prepare_collapsed_beta.py \
     --batch-root /work/results/EPICv2_batches \
     --sample-sheet /work/name_table/EPICv2_blood.txt \
     --out-dir /work/postprocess/EPICv2 \
@@ -79,7 +79,7 @@ if [ "${RUN_EPICV2}" = "1" ]; then
   echo "EPICv2: Biolearn clocks with default imputation"
   echo "========================================"
 
-  python -u /opt/pipeline/scripts_postprocess/run_clocks_biolearn_default_meta_grimagev1_lowmem.py \
+  /opt/conda/envs/methylation-beta-pipeline/bin/python -u /opt/pipeline/scripts_postprocess/run_clocks_biolearn_default_meta_grimagev1_lowmem.py \
     --input /work/postprocess/EPICv2/collapsed_beta_matrix.txt \
     --meta /work/meta.csv \
     --out-dir /work/postprocess/EPICv2_biolearn_default_grimagev1 \
@@ -116,7 +116,7 @@ if [ "${RUN_MSA}" = "1" ]; then
   echo "MSA: combine collapsed beta matrices"
   echo "========================================"
 
-  python /opt/pipeline/scripts_postprocess/prepare_collapsed_beta.py \
+  /opt/conda/envs/methylation-beta-pipeline/bin/python /opt/pipeline/scripts_postprocess/prepare_collapsed_beta.py \
     --batch-root /work/results/MSA_batches \
     --sample-sheet /work/name_table/MSA_blood.txt \
     --out-dir /work/postprocess/MSA \
@@ -128,7 +128,7 @@ if [ "${RUN_MSA}" = "1" ]; then
   echo "MSA: Biolearn clocks with default imputation"
   echo "========================================"
 
-  python -u /opt/pipeline/scripts_postprocess/run_clocks_biolearn_default_meta_grimagev1_lowmem.py \
+  /opt/conda/envs/methylation-beta-pipeline/bin/python -u /opt/pipeline/scripts_postprocess/run_clocks_biolearn_default_meta_grimagev1_lowmem.py \
     --input /work/postprocess/MSA/collapsed_beta_matrix.txt \
     --meta /work/meta.csv \
     --out-dir /work/postprocess/MSA_biolearn_default_grimagev1 \
@@ -141,7 +141,7 @@ echo "========================================"
 echo "Create 12 R-input files from EPICv2/MSA clock.csv"
 echo "========================================"
 
-python /opt/pipeline/scripts_postprocess/create_clock_training_testing_files.py \
+/opt/conda/envs/methylation-beta-pipeline/bin/python /opt/pipeline/scripts_postprocess/create_clock_training_testing_files.py \
   --epicv2-clock /work/postprocess/EPICv2_biolearn_default_grimagev1/clock.csv \
   --msa-clock /work/postprocess/MSA_biolearn_default_grimagev1/clock.csv \
   --training-template /work/templates/training.csv \

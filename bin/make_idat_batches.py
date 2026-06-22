@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env /opt/conda/envs/methylation-beta-pipeline/bin/python
 
 from pathlib import Path
 import argparse

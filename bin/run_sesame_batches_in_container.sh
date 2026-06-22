@@ -58,7 +58,7 @@ do
   fi
 
   set +e
-  Rscript /opt/pipeline/scripts/sesame.R \
+  /opt/conda/envs/methylation-beta-pipeline/bin/Rscript /opt/pipeline/scripts/sesame.R \
     --idat_dir "${B}" \
     --out_path "${OUT}" \
     --array_type "${ARRAY_TYPE}" \

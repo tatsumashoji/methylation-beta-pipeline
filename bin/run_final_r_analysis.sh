@@ -45,7 +45,7 @@ done
 
 mkdir -p "${OUT_DIR}/logs"
 
-Rscript -e '
+/opt/conda/envs/methylation-beta-pipeline/bin/Rscript -e '
 pkgs <- c("tidyverse", "ggplot2", "knitr", "gridExtra", "cowplot")
 missing <- pkgs[!vapply(pkgs, requireNamespace, logical(1), quietly = TRUE)]
 if (length(missing) > 0) {
@@ -56,7 +56,7 @@ cat("R package check OK\n")
 
 LOG="${OUT_DIR}/logs/epigenetic_clock_msa_vs_epicv2.log"
 
-Rscript "${R_SCRIPT}" "${INPUT_DIR}" "${OUT_DIR}" 2>&1 | tee "${LOG}"
+/opt/conda/envs/methylation-beta-pipeline/bin/Rscript "${R_SCRIPT}" "${INPUT_DIR}" "${OUT_DIR}" 2>&1 | tee "${LOG}"
 
 echo "========================================"
 echo "Final R analysis finished."
