@@ -83,6 +83,26 @@ idat_MSA/
 
 ---
 
+## Software version locking
+
+The Docker environment is managed by conda and conda-lock.
+
+The direct dependency specification is:
+
+```text
+environment.yml
+```
+
+The fully resolved lockfile is:
+
+```text
+conda-lock.yml
+```
+
+All R, Python, Bioconductor, and conda package versions used in the Docker image are fixed by conda-lock.yml.
+
+---
+
 ## Setup
 
 Clone this repository:
@@ -155,6 +175,17 @@ docker run --rm \
   -w /work \
   methylation-idat-pipeline:grimagev1-biolearn-default \
   /work/bin/run_all_pipeline.sh
+```
+
+Do not run conda update, pip install, install.packages(), or BiocManager::install() during pipeline execution, because this may change package versions and break reproducibility.
+
+A record of the installed package versions is provided under:
+
+```text
+package_versions/
+├── conda_list_linux-64.txt
+├── R_sessionInfo.txt
+└── pip_freeze.txt
 ```
 
 ---
