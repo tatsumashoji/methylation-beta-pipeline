@@ -171,6 +171,7 @@ To run the full pipeline, use:
 docker run --rm \
   --platform linux/amd64 \
   -e EXPERIMENT_HUB_CACHE=/work/vendor/sesame_cache \
+  -e BFC_CACHE=/work/vendor/sesame_cache \
   -v "$PWD":/work \
   -w /work \
   methylation-idat-pipeline:grimagev1-biolearn-default \

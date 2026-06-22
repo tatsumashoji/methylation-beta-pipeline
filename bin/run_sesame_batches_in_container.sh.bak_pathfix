@@ -5,9 +5,9 @@ DATASET="${1:?Usage: run_sesame_batches_in_container.sh EPICv2|MSA}"
 
 THREADS="${THREADS:-1}"
 PVAL_THRESHOLD="${PVAL_THRESHOLD:-0.05}"
-SESAME_CACHE="${SESAME_CACHE:-/work/vendor/sesame_cache}"
+SESAME_CACHE="${SESAME_CACHE:-/opt/sesame_cache}"
 
-MANIFEST_DIR="${MANIFEST_DIR:-/work/manifest}"
+MANIFEST_DIR="${MANIFEST_DIR:-/opt/pipeline/manifest}"
 
 case "${DATASET}" in
   EPICv2)

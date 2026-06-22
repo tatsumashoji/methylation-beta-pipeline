@@ -10,7 +10,7 @@ RUN_EPICV2="${RUN_EPICV2:-1}"
 RUN_MSA="${RUN_MSA:-1}"
 RUN_FINAL_R_ANALYSIS="${RUN_FINAL_R_ANALYSIS:-1}"
 
-SESAME_CACHE="${SESAME_CACHE:-/work/vendor/sesame_cache}"
+SESAME_CACHE="${SESAME_CACHE:-/opt/sesame_cache}"
 
 echo "========================================"
 echo "Methylation IDAT pipeline"
