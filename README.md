@@ -172,6 +172,8 @@ docker run --rm \
   --platform linux/amd64 \
   -e EXPERIMENT_HUB_CACHE=/work/vendor/sesame_cache \
   -e BFC_CACHE=/work/vendor/sesame_cache \
+  -e SESAME_CACHE=/work/vendor/sesame_cache \
+  -e MANIFEST_DIR=/work/manifest \
   -e OMP_NUM_THREADS=1 \
   -e OPENBLAS_NUM_THREADS=1 \
   -e MKL_NUM_THREADS=1 \
@@ -212,7 +214,7 @@ clock_compare_outputs_grimagev1/
 
 ---
 
-## To make beta tables only
+## To prepare beta tables only
 
 Both EPICv2 and MSA:
 
@@ -236,9 +238,18 @@ docker run --rm \
     set -euo pipefail
 
     echo "========================================"
-    echo "Create IDAT batches"
+    echo "Create EPICv2 IDAT batches"
     echo "========================================"
-    /opt/conda/envs/methylation-beta-pipeline/bin/python /work/bin/make_idat_batches.py
+    /opt/conda/envs/methylation-beta-pipeline/bin/python /work/bin/make_idat_batches.py \
+      --src /work/idat_EPICv2 \
+      --out /work/idat_batches_EPICv2
+
+    echo "========================================"
+    echo "Create MSA IDAT batches"
+    echo "========================================"
+    /opt/conda/envs/methylation-beta-pipeline/bin/python /work/bin/make_idat_batches.py \
+      --src /work/idat_MSA \
+      --out /work/idat_batches_MSA
 
     echo "========================================"
     echo "EPICv2: SeSAMe IDAT to per-batch collapsed beta"
@@ -251,9 +262,30 @@ docker run --rm \
     /work/bin/run_sesame_batches_in_container.sh MSA
 
     echo "========================================"
-    echo "Combine collapsed beta matrices"
+    echo "EPICv2: combine collapsed beta matrices"
     echo "========================================"
-    /opt/conda/envs/methylation-beta-pipeline/bin/python /work/scripts_postprocess/prepare_collapsed_beta.py
+    /opt/conda/envs/methylation-beta-pipeline/bin/python \
+      /work/scripts_postprocess/prepare_collapsed_beta.py \
+      --batch-root /work/results/EPICv2_batches \
+      --sample-sheet /work/name_table/EPICv2_blood.txt \
+      --out-dir /work/postprocess/EPICv2 \
+      --batch-file-name collapsed_beta_matrix.txt \
+      --output-name collapsed_beta_matrix.txt \
+      --orientation auto \
+      --drop-unmapped
+
+    echo "========================================"
+    echo "MSA: combine collapsed beta matrices"
+    echo "========================================"
+    /opt/conda/envs/methylation-beta-pipeline/bin/python \
+      /work/scripts_postprocess/prepare_collapsed_beta.py \
+      --batch-root /work/results/MSA_batches \
+      --sample-sheet /work/name_table/MSA_blood.txt \
+      --out-dir /work/postprocess/MSA \
+      --batch-file-name collapsed_beta_matrix.txt \
+      --output-name collapsed_beta_matrix.txt \
+      --orientation auto \
+      --drop-unmapped
   '
 ```
 
@@ -279,9 +311,11 @@ docker run --rm \
     set -euo pipefail
 
     echo "========================================"
-    echo "Create IDAT batches"
+    echo "Create EPICv2 IDAT batches"
     echo "========================================"
-    /opt/conda/envs/methylation-beta-pipeline/bin/python /work/bin/make_idat_batches.py
+    /opt/conda/envs/methylation-beta-pipeline/bin/python /work/bin/make_idat_batches.py \
+      --src /work/idat_EPICv2 \
+      --out /work/idat_batches_EPICv2
 
     echo "========================================"
     echo "EPICv2: SeSAMe IDAT to per-batch collapsed beta"
@@ -289,9 +323,17 @@ docker run --rm \
     /work/bin/run_sesame_batches_in_container.sh EPICv2
 
     echo "========================================"
-    echo "Combine collapsed beta matrices"
+    echo "EPICv2: combine collapsed beta matrices"
     echo "========================================"
-    /opt/conda/envs/methylation-beta-pipeline/bin/python /work/scripts_postprocess/prepare_collapsed_beta.py
+    /opt/conda/envs/methylation-beta-pipeline/bin/python \
+      /work/scripts_postprocess/prepare_collapsed_beta.py \
+      --batch-root /work/results/EPICv2_batches \
+      --sample-sheet /work/name_table/EPICv2_blood.txt \
+      --out-dir /work/postprocess/EPICv2 \
+      --batch-file-name collapsed_beta_matrix.txt \
+      --output-name collapsed_beta_matrix.txt \
+      --orientation auto \
+      --drop-unmapped
   '
 ```
 
@@ -317,9 +359,11 @@ docker run --rm \
     set -euo pipefail
 
     echo "========================================"
-    echo "Create IDAT batches"
+    echo "Create MSA IDAT batches"
     echo "========================================"
-    /opt/conda/envs/methylation-beta-pipeline/bin/python /work/bin/make_idat_batches.py
+    /opt/conda/envs/methylation-beta-pipeline/bin/python /work/bin/make_idat_batches.py \
+      --src /work/idat_MSA \
+      --out /work/idat_batches_MSA
 
     echo "========================================"
     echo "MSA: SeSAMe IDAT to per-batch collapsed beta"
@@ -327,9 +371,17 @@ docker run --rm \
     /work/bin/run_sesame_batches_in_container.sh MSA
 
     echo "========================================"
-    echo "Combine collapsed beta matrices"
+    echo "MSA: combine collapsed beta matrices"
     echo "========================================"
-    /opt/conda/envs/methylation-beta-pipeline/bin/python /work/scripts_postprocess/prepare_collapsed_beta.py
+    /opt/conda/envs/methylation-beta-pipeline/bin/python \
+      /work/scripts_postprocess/prepare_collapsed_beta.py \
+      --batch-root /work/results/MSA_batches \
+      --sample-sheet /work/name_table/MSA_blood.txt \
+      --out-dir /work/postprocess/MSA \
+      --batch-file-name collapsed_beta_matrix.txt \
+      --output-name collapsed_beta_matrix.txt \
+      --orientation auto \
+      --drop-unmapped
   '
 ```
 ---

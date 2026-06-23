@@ -3,16 +3,33 @@ channels:
   - conda-forge
   - bioconda
 dependencies:
+  # Core languages
   - python=3.11
   - pip
   - r-base=4.5
 
+  # Bioconductor / SeSAMe
   - bioconductor-sesame=1.28.1
   - bioconductor-sesamedata=1.28.0
   - bioconductor-biocparallel
   - bioconductor-experimenthub
   - bioconductor-biocfilecache
+  - bioconductor-preprocesscore=1.72.0
 
+  # R package management
+  - r-biocmanager
+  - r-remotes
+
+  # Compiler toolchain required for source installation of preprocessCore
+  - gcc_linux-64
+  - gxx_linux-64
+  - gfortran_linux-64
+  - binutils_linux-64
+  - sysroot_linux-64
+  - make
+  - pkg-config
+
+  # R packages used by the pipeline
   - r-logger
   - r-data.table
   - r-dplyr
@@ -27,7 +44,11 @@ dependencies:
   - r-cowplot
   - r-broom
   - r-scales
+  - r-jsonlite
+  - r-readr
+  - r-stringr
 
+  # Python packages used by scripts_postprocess
   - pandas
   - numpy
   - scipy
@@ -37,7 +58,10 @@ dependencies:
   - seaborn
   - openpyxl
   - tqdm
+  - pyarrow
+  - statsmodels
 
+  # pip packages
   - pip:
       - biolearn==0.9.1
       - torch==2.5.1
