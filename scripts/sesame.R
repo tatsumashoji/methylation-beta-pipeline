@@ -1,862 +1,331 @@
 #!/usr/bin/env Rscript
 
-# Description: Generate beta-value matrices and auditable probe-level QC reports
-# from Illumina IDAT files using SeSAMe.
+# Dockerized SeSAMe IDAT-to-beta pipeline with per-sample collapsed-CpG QC loss logging.
+# Main outputs per batch:
+#   collapsed_beta_matrix.txt
+#   qc_probe_failures_by_sample.tsv.gz
+#   qc_probe_failures.tsv.gz
+#   pre_qc_collapsed_probe_ids.txt.gz
+#   post_qc_collapsed_probe_ids.txt.gz
+#   qc_batch_summary.csv
+# Optional large outputs are controlled by SAVE_* environment variables or CLI flags.
 
-suppressPackageStartupMessages({
-    library(logger)
-    library(sesame)
-    library(data.table)
-    library(dplyr)
-    library(BiocParallel)
-    library(ExperimentHub)
-    library(magrittr)
-})
+suppressPackageStartupMessages(library(logger))
+suppressPackageStartupMessages(library(sesame))
+suppressPackageStartupMessages(library(data.table))
+suppressPackageStartupMessages(library(dplyr))
+suppressPackageStartupMessages(library(BiocParallel))
+suppressPackageStartupMessages(library(ExperimentHub))
+suppressPackageStartupMessages(library(magrittr))
+suppressPackageStartupMessages(library(this.path))
 
+source(paste0(this.path::this.dir(), "/array_utils.R"))
+
+suppressWarnings(try(sesame_checkVersion(), silent = TRUE))
 BiocParallel::register(BiocParallel::SerialParam(), default = TRUE)
 
-source(file.path(this.path::this.dir(), "array_utils.R"))
-
-sesame_checkVersion()
-
-################################################################################
-# Helpers
-################################################################################
-
-parse_bool <- function(value) {
-    tolower(as.character(value)) %in% c("true", "t", "1", "yes", "y")
+str_to_bool <- function(x, default = FALSE) {
+    if (is.null(x) || length(x) == 0 || is.na(x) || x == "") return(default)
+    tolower(as.character(x)) %in% c("true", "t", "1", "yes", "y")
 }
 
-parse_cli_args <- function(args) {
-    opts <- list(
-        idat_dir = NULL,
-        out_path = NULL,
-        manifest_file = NULL,
-        pval_threshold = 0.05,
-        threads = 1L,
-        array_type = "EPICv2",
-        sesame_data = NULL,
-        skip_annotation = TRUE,
-        save_raw_beta = FALSE,
-        save_noncollapsed_beta = FALSE,
-        save_detection_pvals = FALSE,
-        save_intensity = FALSE
-    )
-
-    if (length(args) == 0L) {
-        stop("No arguments supplied. Use --help for usage.", call. = FALSE)
-    }
-
-    i <- 1L
-    while (i <= length(args)) {
-        arg <- args[[i]]
-
-        if (arg == "--help") {
-            cat(
-                paste0(
-                    "Usage: sesame.R \\\n",
-                    "  --idat_dir <directory> \\\n",
-                    "  --out_path <directory> \\\n",
-                    "  --array_type <EPICv2|MSA|RhelixaCustom|...> \\\n",
-                    "  [--manifest_file <csv>] \\\n",
-                    "  [--pval_threshold <number>] \\\n",
-                    "  [--threads <integer>] \\\n",
-                    "  [--sesame_data <directory>] \\\n",
-                    "  [--skip_annotation <true|false>] \\n",
-                    "  [--save_raw_beta <true|false>] \\n",
-                    "  [--save_noncollapsed_beta <true|false>] \\n",
-                    "  [--save_detection_pvals <true|false>] \\n",
-                    "  [--save_intensity <true|false>]\n"
-                )
-            )
-            quit(status = 0L)
-        }
-
-        if (i == length(args)) {
-            stop("Missing value after argument: ", arg, call. = FALSE)
-        }
-        value <- args[[i + 1L]]
-
-        if (arg %in% c("--idat_dir", "-i")) {
-            opts$idat_dir <- value
-        } else if (arg %in% c("--out_path", "-o")) {
-            opts$out_path <- value
-        } else if (arg == "--manifest_file") {
-            opts$manifest_file <- value
-        } else if (arg == "--pval_threshold") {
-            opts$pval_threshold <- as.numeric(value)
-        } else if (arg == "--threads") {
-            # The Docker workflow intentionally forces serial execution.
-            opts$threads <- 1L
-        } else if (arg == "--array_type") {
-            opts$array_type <- value
-        } else if (arg == "--sesame_data") {
-            opts$sesame_data <- value
-        } else if (arg == "--skip_annotation") {
-            opts$skip_annotation <- parse_bool(value)
-        } else if (arg == "--save_raw_beta") {
-            opts$save_raw_beta <- parse_bool(value)
-        } else if (arg == "--save_noncollapsed_beta") {
-            opts$save_noncollapsed_beta <- parse_bool(value)
-        } else if (arg == "--save_detection_pvals") {
-            opts$save_detection_pvals <- parse_bool(value)
-        } else if (arg == "--save_intensity") {
-            opts$save_intensity <- parse_bool(value)
-        } else {
-            stop("Unknown argument: ", arg, call. = FALSE)
-        }
-
-        i <- i + 2L
-    }
-
-    if (is.null(opts$idat_dir) || !nzchar(opts$idat_dir)) {
-        stop("--idat_dir is required.", call. = FALSE)
-    }
-    if (is.null(opts$out_path) || !nzchar(opts$out_path)) {
-        stop("--out_path is required.", call. = FALSE)
-    }
-    if (!dir.exists(opts$idat_dir)) {
-        stop("IDAT directory does not exist: ", opts$idat_dir, call. = FALSE)
-    }
-    if (!is.finite(opts$pval_threshold) || opts$pval_threshold < 0 || opts$pval_threshold > 1) {
-        stop("--pval_threshold must be between 0 and 1.", call. = FALSE)
-    }
-
-    opts
+collapse_probe_id <- function(x) {
+    ifelse(grepl("_", x), sub("_(?:[^_]*)$", "", x), x)
 }
 
-matrix_from_named_vectors <- function(vectors, sample_names, label) {
-    if (length(vectors) == 0L) {
-        stop("No vectors were produced for ", label, ".", call. = FALSE)
-    }
-    if (length(vectors) != length(sample_names)) {
-        stop("Vector/sample count mismatch for ", label, ".", call. = FALSE)
-    }
+write_lines_gz <- function(x, path) {
+    con <- gzfile(path, open = "wt")
+    on.exit(close(con), add = TRUE)
+    writeLines(sort(unique(as.character(x))), con)
+}
 
-    reference_ids <- names(vectors[[1L]])
-    if (is.null(reference_ids)) {
-        stop("The first vector for ", label, " has no probe names.", call. = FALSE)
+safe_colnames <- function(mat, sample_ids) {
+    if (is.null(dim(mat))) {
+        mat <- matrix(mat, ncol = 1)
     }
-
-    aligned <- lapply(seq_along(vectors), function(i) {
-        x <- vectors[[i]]
-        ids <- names(x)
-        if (is.null(ids)) {
-            stop("A vector for ", label, " has no probe names.", call. = FALSE)
-        }
-        if (!identical(ids, reference_ids)) {
-            if (!setequal(ids, reference_ids)) {
-                stop(
-                    "Probe sets differ between samples while constructing ",
-                    label,
-                    ".",
-                    call. = FALSE
-                )
-            }
-            x <- x[reference_ids]
-        }
-        as.numeric(x)
-    })
-
-    result <- do.call(cbind, aligned)
-    if (is.null(dim(result))) {
-        result <- matrix(result, ncol = 1L)
+    if (is.null(colnames(mat)) || length(colnames(mat)) != length(sample_ids)) {
+        colnames(mat) <- sample_ids
     }
-    rownames(result) <- reference_ids
-    colnames(result) <- sample_names
-    result
+    mat
 }
 
 write_matrix_tsv <- function(mat, path) {
     dt <- data.table::as.data.table(mat, keep.rownames = "ProbeID")
-    data.table::fwrite(
-        dt,
-        path,
-        sep = "\t",
-        quote = FALSE,
-        row.names = FALSE,
-        na = "NA"
+    data.table::fwrite(dt, path, sep = "\t", quote = FALSE, row.names = FALSE, na = "NA")
+    invisible(NULL)
+}
+
+parse_args <- function(args) {
+    cfg <- list(
+        threads = 1,
+        pval_threshold = 0.05,
+        array_type = "EPICv2",
+        manifest_file = NULL,
+        sesame_data = NULL,
+        skip_annotation = TRUE,
+        save_raw_beta = str_to_bool(Sys.getenv("SAVE_RAW_BETA", "0")),
+        save_noncollapsed_beta = str_to_bool(Sys.getenv("SAVE_NONCOLLAPSED_BETA", "0")),
+        save_detection_pvals = str_to_bool(Sys.getenv("SAVE_DETECTION_PVALS", "0")),
+        save_intensity = str_to_bool(Sys.getenv("SAVE_INTENSITY", "0"))
     )
-    invisible(dt)
-}
 
-write_gzip_lines <- function(values, path) {
-    con <- gzfile(path, open = "wt")
-    on.exit(close(con), add = TRUE)
-    writeLines(sort(unique(as.character(values))), con = con)
-}
-
-accumulate_pre_qc_collapsed_counts <- function(sdf_list, pval_threshold) {
-    counts <- integer(0)
-
-    for (i in seq_along(sdf_list)) {
-        # Apply the same QCDPB signal-processing sequence as the final matrix,
-        # but ignore its mask when extracting the pre-QC beta vector. This
-        # isolates value loss caused by SeSAMe's accumulated Q/P masks rather
-        # than conflating it with channel, dye-bias or noob transformations.
-        processed <- sesame::prepSesame(
-            sdf_list[[i]],
-            prep = "QCDPB",
-            prep_args = list(P = list(pval.threshold = pval_threshold))
-        )
-        unmasked_collapsed <- sesame::getBetas(
-            processed,
-            mask = FALSE,
-            collapseToPfx = TRUE,
-            collapseMethod = "mean"
-        )
-
-        ids <- names(unmasked_collapsed)
-        keep <- !is.na(ids) & grepl("^cg[0-9]+$", ids)
-        ids <- ids[keep]
-        values_present <- !is.na(unmasked_collapsed[keep])
-
-        new_ids <- setdiff(ids, names(counts))
-        if (length(new_ids) > 0L) {
-            counts <- c(counts, stats::setNames(integer(length(new_ids)), new_ids))
+    i <- 1
+    while (i <= length(args)) {
+        arg <- args[i]
+        if (arg == "--help") {
+            cat("Usage: sesame.R --idat_dir <dir> --out_path <dir> --array_type <EPICv2|MSA|RhelixaCustom> --manifest_file <file> --pval_threshold <float> --threads <int> --sesame_data <dir> --skip_annotation true|false [--save_raw_beta true|false] [--save_noncollapsed_beta true|false] [--save_detection_pvals true|false] [--save_intensity true|false]\n")
+            q(status = 0)
+        } else if (arg %in% c("--idat_dir", "-i")) {
+            cfg$idat_dir <- args[i + 1]; i <- i + 1
+        } else if (arg %in% c("--out_path", "-o")) {
+            cfg$out_path <- args[i + 1]; i <- i + 1
+        } else if (arg == "--manifest_file") {
+            cfg$manifest_file <- args[i + 1]; i <- i + 1
+        } else if (arg == "--pval_threshold") {
+            cfg$pval_threshold <- as.numeric(args[i + 1]); i <- i + 1
+        } else if (arg == "--threads") {
+            cfg$threads <- 1; i <- i + 1
+        } else if (arg == "--array_type") {
+            cfg$array_type <- args[i + 1]; i <- i + 1
+        } else if (arg == "--sesame_data") {
+            cfg$sesame_data <- args[i + 1]; i <- i + 1
+        } else if (arg == "--skip_annotation") {
+            cfg$skip_annotation <- str_to_bool(args[i + 1], default = TRUE); i <- i + 1
+        } else if (arg == "--save_raw_beta") {
+            cfg$save_raw_beta <- str_to_bool(args[i + 1]); i <- i + 1
+        } else if (arg == "--save_noncollapsed_beta") {
+            cfg$save_noncollapsed_beta <- str_to_bool(args[i + 1]); i <- i + 1
+        } else if (arg == "--save_detection_pvals") {
+            cfg$save_detection_pvals <- str_to_bool(args[i + 1]); i <- i + 1
+        } else if (arg == "--save_intensity") {
+            cfg$save_intensity <- str_to_bool(args[i + 1]); i <- i + 1
+        } else {
+            stop(paste0("Unknown argument: ", arg))
         }
-        counts[ids] <- counts[ids] + as.integer(values_present)
+        i <- i + 1
     }
 
-    counts
+    if (is.null(cfg$idat_dir)) stop("--idat_dir is required")
+    if (is.null(cfg$out_path)) stop("--out_path is required")
+    cfg
 }
-
-write_qc_probe_reports <- function(
-    sdf_list,
-    collapsed_betas_matrix,
-    sample_names,
-    out_path,
-    array_type,
-    pval_threshold
-) {
-    logger::log_info("Summarizing CpGs affected by QCDPB QC/preprocessing...")
-
-    pre_counts <- accumulate_pre_qc_collapsed_counts(
-        sdf_list,
-        pval_threshold = pval_threshold
-    )
-
-    post_ids <- rownames(collapsed_betas_matrix)
-    post_keep <- !is.na(post_ids) & grepl("^cg[0-9]+$", post_ids)
-    post_counts <- stats::setNames(
-        rowSums(!is.na(collapsed_betas_matrix[post_keep, , drop = FALSE])),
-        post_ids[post_keep]
-    )
-
-    all_ids <- union(names(pre_counts), names(post_counts))
-    pre_aligned <- stats::setNames(integer(length(all_ids)), all_ids)
-    post_aligned <- stats::setNames(integer(length(all_ids)), all_ids)
-    pre_aligned[names(pre_counts)] <- pre_counts
-    post_aligned[names(post_counts)] <- post_counts
-
-    unexpected_gain <- post_aligned > pre_aligned
-    if (any(unexpected_gain)) {
-        logger::log_warn(
-            paste0(
-                sum(unexpected_gain),
-                " CpGs had more non-missing post-QC than pre-QC values; ",
-                "their loss count was truncated at zero."
-            )
-        )
-    }
-
-    failed_counts <- pmax(pre_aligned - post_aligned, 0L)
-    evaluable <- pre_aligned > 0L
-    affected <- evaluable & failed_counts > 0L
-    completely_lost <- affected & post_aligned == 0L
-
-    n_affected <- sum(affected)
-    batch_name <- basename(normalizePath(out_path, mustWork = FALSE))
-    qc_probe_failures <- data.table::data.table(
-        dataset = rep(array_type, n_affected),
-        batch = rep(batch_name, n_affected),
-        ProbeID = all_ids[affected],
-        total_samples = rep(length(sample_names), n_affected),
-        pre_qc_nonmissing_samples = as.integer(pre_aligned[affected]),
-        post_qc_nonmissing_samples = as.integer(post_aligned[affected]),
-        qc_failed_samples = as.integer(failed_counts[affected])
-    )
-
-    if (nrow(qc_probe_failures) > 0L) {
-        qc_probe_failures[
-            , qc_failed_fraction_of_evaluable :=
-                qc_failed_samples / pre_qc_nonmissing_samples
-        ]
-        qc_probe_failures[
-            , qc_failed_fraction_of_all_samples :=
-                qc_failed_samples / total_samples
-        ]
-        qc_probe_failures[
-            , qc_failed_in_any_sample := qc_failed_samples > 0L
-        ]
-        qc_probe_failures[
-            , qc_failed_in_all_evaluable_samples :=
-                qc_failed_samples == pre_qc_nonmissing_samples
-        ]
-        qc_probe_failures[
-            , qc_completely_lost_in_batch :=
-                post_qc_nonmissing_samples == 0L
-        ]
-        data.table::setorder(qc_probe_failures, -qc_failed_samples, ProbeID)
-    } else {
-        qc_probe_failures[
-            , `:=`(
-                qc_failed_fraction_of_evaluable = numeric(),
-                qc_failed_fraction_of_all_samples = numeric(),
-                qc_failed_in_any_sample = logical(),
-                qc_failed_in_all_evaluable_samples = logical(),
-                qc_completely_lost_in_batch = logical()
-            )
-        ]
-    }
-
-    data.table::fwrite(
-        qc_probe_failures,
-        file.path(out_path, "qc_probe_failures.tsv.gz"),
-        sep = "\t",
-        quote = FALSE,
-        row.names = FALSE,
-        na = "NA",
-        compress = "gzip"
-    )
-
-    pre_available_ids <- names(pre_aligned)[pre_aligned > 0L]
-    post_available_ids <- names(post_aligned)[post_aligned > 0L]
-
-    write_gzip_lines(
-        pre_available_ids,
-        file.path(out_path, "pre_qc_collapsed_probe_ids.txt.gz")
-    )
-    write_gzip_lines(
-        post_available_ids,
-        file.path(out_path, "post_qc_collapsed_probe_ids.txt.gz")
-    )
-
-    qc_batch_summary <- data.table::data.table(
-        dataset = array_type,
-        batch = basename(normalizePath(out_path, mustWork = FALSE)),
-        n_samples = length(sample_names),
-        pval_threshold = pval_threshold,
-        n_pre_qc_cpgs_with_any_value = sum(pre_aligned > 0L),
-        n_post_qc_cpgs_with_any_value = sum(post_aligned > 0L),
-        n_qc_affected_cpgs = sum(affected),
-        n_qc_completely_lost_cpgs = sum(completely_lost),
-        n_qc_partially_affected_cpgs = sum(affected & !completely_lost),
-        n_qc_failed_sample_cpg_pairs = sum(failed_counts)
-    )
-
-    data.table::fwrite(
-        qc_batch_summary,
-        file.path(out_path, "qc_batch_summary.csv"),
-        quote = TRUE,
-        row.names = FALSE
-    )
-
-    logger::log_info(
-        paste0(
-            "QC report: ",
-            sum(affected),
-            " CpGs affected in at least one sample; ",
-            sum(completely_lost),
-            " CpGs completely lost in this batch."
-        )
-    )
-}
-
-################################################################################
-# Main
-################################################################################
 
 main <- function() {
-    opts <- parse_cli_args(commandArgs(trailingOnly = TRUE))
+    cfg <- parse_args(commandArgs(trailingOnly = TRUE))
 
-    idat_dir <- opts$idat_dir
-    out_path <- opts$out_path
-    manifest_file <- opts$manifest_file
-    pval_threshold <- opts$pval_threshold
-    threads <- 1L
-    array_type <- opts$array_type
-    sesame_data <- opts$sesame_data
-    skip_annotation <- opts$skip_annotation
-    save_raw_beta <- opts$save_raw_beta
-    save_noncollapsed_beta <- opts$save_noncollapsed_beta
-    save_detection_pvals <- opts$save_detection_pvals
-    save_intensity <- opts$save_intensity
+    dir.create(cfg$out_path, showWarnings = FALSE, recursive = TRUE)
 
-    dir.create(out_path, recursive = TRUE, showWarnings = FALSE)
-
-    logger::log_info(paste0("IDAT directory: ", idat_dir))
-    logger::log_info(paste0("Output directory: ", out_path))
-    logger::log_info(paste0("Manifest file: ", manifest_file))
-    logger::log_info(paste0("Array type: ", array_type))
-    logger::log_info(paste0("p-value threshold: ", pval_threshold))
-    logger::log_info(paste0("Number of threads: ", threads))
-    logger::log_info(paste0("sesame_data: ", sesame_data))
-    logger::log_info(paste0("skip_annotation: ", skip_annotation))
-    logger::log_info(paste0("save_raw_beta: ", save_raw_beta))
-    logger::log_info(paste0("save_noncollapsed_beta: ", save_noncollapsed_beta))
-    logger::log_info(paste0("save_detection_pvals: ", save_detection_pvals))
-    logger::log_info(paste0("save_intensity: ", save_intensity))
+    logger::log_info(paste0("IDAT directory: ", cfg$idat_dir))
+    logger::log_info(paste0("Output directory: ", cfg$out_path))
+    logger::log_info(paste0("Manifest file: ", cfg$manifest_file))
+    logger::log_info(paste0("Array type: ", cfg$array_type))
+    logger::log_info(paste0("p-value threshold: ", cfg$pval_threshold))
+    logger::log_info("Number of threads: 1")
+    logger::log_info(paste0("sesame_data: ", cfg$sesame_data))
+    logger::log_info(paste0("skip_annotation: ", cfg$skip_annotation))
+    logger::log_info(paste0("save_raw_beta: ", cfg$save_raw_beta))
+    logger::log_info(paste0("save_noncollapsed_beta: ", cfg$save_noncollapsed_beta))
+    logger::log_info(paste0("save_detection_pvals: ", cfg$save_detection_pvals))
+    logger::log_info(paste0("save_intensity: ", cfg$save_intensity))
 
     bp <- BiocParallel::SerialParam()
 
-    if (is.null(sesame_data)) {
-        sesame_data <- array_utils.sesame_data_path()
-    }
-    if (!dir.exists(sesame_data)) {
-        stop("SeSAMe cache directory does not exist: ", sesame_data, call. = FALSE)
-    }
-    ExperimentHub::setExperimentHubOption("CACHE", sesame_data)
+    if (is.null(cfg$sesame_data)) cfg$sesame_data <- array_utils.sesame_data_path()
+    ExperimentHub::setExperimentHubOption("CACHE", cfg$sesame_data)
 
-    if (array_type == "RhelixaCustom") {
-        if (is.null(manifest_file)) {
-            manifest_file <- array_utils.manifest_path(array_type)
-        }
-        manifest <- array_utils.read_manifest(manifest_file, threads = threads)
+    if (cfg$array_type == "RhelixaCustom") {
+        if (is.null(cfg$manifest_file)) cfg$manifest_file <- array_utils.manifest_path(cfg$array_type)
+        manifest <- array_utils.read_manifest(cfg$manifest_file, threads = 1)
     } else {
         manifest <- NULL
     }
 
     logger::log_info("Reading IDAT files...")
-    idat_prefixes <- sesame::searchIDATprefixes(idat_dir)
-    if (length(idat_prefixes) == 0L) {
-        stop("No paired IDAT prefixes were found in: ", idat_dir, call. = FALSE)
-    }
-    sample_names <- basename(idat_prefixes)
-    if (anyDuplicated(sample_names)) {
-        stop("Duplicate sample prefixes were detected in the IDAT directory.", call. = FALSE)
-    }
+    idat_prefixes <- sesame::searchIDATprefixes(cfg$idat_dir)
+    if (length(idat_prefixes) == 0) stop("No IDAT prefixes found")
 
     sdf_list <- BiocParallel::bplapply(
         idat_prefixes,
         function(pfx) sesame::readIDATpair(pfx, manifest = manifest),
         BPPARAM = bp
     )
-    names(sdf_list) <- sample_names
+    sample_ids <- basename(idat_prefixes)
+    names(sdf_list) <- sample_ids
 
-    ########################################
-    # Per-sample QC summary
-    ########################################
     logger::log_info("Calculating QC metrics...")
     qcs <- do.call(
         rbind,
         BiocParallel::bplapply(
             sdf_list,
             function(sdf) {
-                as.data.frame(
-                    sesame::sesameQC_calcStats(sdf, c("numProbes", "detection")),
-                    stringsAsFactors = FALSE
-                )
+                as.data.frame(sesame::sesameQC_calcStats(sdf, c("numProbes", "detection")), stringsAsFactors = FALSE)
             },
             BPPARAM = bp
         )
     )
-    rownames(qcs) <- sample_names
     qcs$frac_dt <- qcs$num_dt / qcs$num_probes
-    qcs <- qcs[
-        c(
-            "num_probes", "num_dt", "frac_dt",
-            "num_probes_cg", "num_dt_cg", "frac_dt_cg",
-            "num_probes_ch", "num_dt_ch", "frac_dt_ch"
-        )
-    ]
-    colnames(qcs) <- c(
-        "N. Probes", "Detected Probes", "Detection Rate",
-        "N. Probes(CG)", "Detected Probes(CG)", "Detection Rate(CG)",
-        "N. Probes (CH)", "Detected Probes(CH)", "Detection Rate(CH)"
-    )
+    qcs <- qcs[c("num_probes", "num_dt", "frac_dt", "num_probes_cg", "num_dt_cg", "frac_dt_cg", "num_probes_ch", "num_dt_ch", "frac_dt_ch")]
+    colnames(qcs) <- c("N. Probes", "Detected Probes", "Detection Rate", "N. Probes(CG)", "Detected Probes(CG)", "Detection Rate(CG)", "N. Probes (CH)", "Detected Probes(CH)", "Detection Rate(CH)")
     qcs <- data.table::as.data.table(qcs, keep.rownames = "SampleName")
-    data.table::fwrite(
-        qcs,
-        file.path(out_path, "qc_summary.txt"),
-        sep = "\t",
-        quote = FALSE,
-        row.names = FALSE,
-        na = "NA"
-    )
-    rm(qcs)
-    gc(reset = TRUE)
+    qcs[, SampleID := sample_ids]
+    data.table::fwrite(qcs, file.path(cfg$out_path, "qc_summary.txt"), sep = "\t", quote = FALSE, row.names = FALSE, na = "NA")
+    rm(qcs); gc(reset = TRUE)
 
-    ########################################
-    # Optional raw beta matrix
-    ########################################
-    if (save_raw_beta) {
-        logger::log_info("Creating the pre-filtering raw beta matrix...")
-        raw_beta_vectors <- BiocParallel::bplapply(
-            sdf_list,
-            function(sdf) sesame::getBetas(sdf),
-            BPPARAM = bp
-        )
-        raw_betas_matrix <- matrix_from_named_vectors(
-            raw_beta_vectors,
-            sample_names,
-            "raw beta matrix"
-        )
-        write_matrix_tsv(raw_betas_matrix, file.path(out_path, "raw_beta_matrix.txt"))
-        rm(raw_beta_vectors, raw_betas_matrix)
-        gc(reset = TRUE)
-    } else {
-        logger::log_info("Skipping raw beta matrix creation because save_raw_beta=FALSE.")
+    if (cfg$save_raw_beta) {
+        logger::log_info("Creating optional raw beta matrix...")
+        raw_betas <- do.call(cbind, BiocParallel::bplapply(sdf_list, sesame::getBetas, BPPARAM = bp))
+        raw_betas <- safe_colnames(raw_betas, sample_ids)
+        write_matrix_tsv(raw_betas, file.path(cfg$out_path, "raw_beta_matrix.txt"))
+        rm(raw_betas); gc(reset = TRUE)
     }
 
-    ########################################
-    # Optional non-collapsed post-QCDPB beta matrix
-    ########################################
-    betas <- NULL
-    manifest_ann <- NULL
-
-    if (save_noncollapsed_beta || !skip_annotation) {
-        logger::log_info("Creating the post-filtering non-collapsed beta matrix...")
-        beta_vectors <- BiocParallel::bplapply(
-            sdf_list,
-            function(sdf) {
-                processed <- sesame::prepSesame(
-                    sdf,
-                    prep = "QCDPB",
-                    prep_args = list(P = list(pval.threshold = pval_threshold))
-                )
-                sesame::getBetas(processed, mask = TRUE)
-            },
-            BPPARAM = bp
-        )
-        betas_matrix <- matrix_from_named_vectors(
-            beta_vectors,
-            sample_names,
-            "post-filtering beta matrix"
-        )
-
-        if (save_noncollapsed_beta) {
-            betas <- write_matrix_tsv(
-                betas_matrix,
-                file.path(out_path, "beta_matrix.txt")
-            )
-        } else {
-            betas <- data.table::as.data.table(betas_matrix, keep.rownames = "ProbeID")
-        }
-
-        rm(beta_vectors, betas_matrix)
-        gc(reset = TRUE)
-    } else {
-        logger::log_info(
-            "Skipping non-collapsed post-filtering beta matrix creation because save_noncollapsed_beta=FALSE and skip_annotation=TRUE."
-        )
-    }
-
-    ########################################
-    # Optional annotation for non-collapsed beta matrix
-    ########################################
-    if (!skip_annotation) {
-        logger::log_info("Creating the annotated beta matrix...")
-
-        if (array_type == "RhelixaCustom") {
-            manifest_ann <- manifest[c("Probe_ID", "CHR", "MAPINFO", "Strand_FR")] %>%
-                tidyr::drop_na(CHR) %>%
-                dplyr::mutate(
-                    CHR = paste0("chr", CHR),
-                    Strand_FR = ifelse(Strand_FR == "F", "+", "-"),
-                    End = MAPINFO + 1
-                ) %>%
-                dplyr::rename(
-                    ProbeID = Probe_ID,
-                    Chromosome = CHR,
-                    Start = MAPINFO,
-                    Strand = Strand_FR
-                ) %>%
-                dplyr::filter(Chromosome != "chr0") %>%
-                dplyr::mutate(
-                    ProbeName = ifelse(
-                        grepl("_", ProbeID),
-                        gsub("_(?:[^_]*)$", "", ProbeID),
-                        ProbeID
+    if (cfg$save_noncollapsed_beta) {
+        logger::log_info("Creating optional non-collapsed post-QC beta matrix...")
+        betas <- do.call(
+            cbind,
+            BiocParallel::bplapply(
+                sdf_list,
+                function(sdf) {
+                    sesame::getBetas(
+                        sesame::prepSesame(sdf, prep = "QCDPB", prep_args = list(P = list(pval.threshold = cfg$pval_threshold)))
                     )
-                ) %>%
-                dplyr::select(ProbeID, ProbeName, Chromosome, Start, End, Strand)
-        } else {
-            manifest_ann <- sesameData::sesameData_getManifestGRanges(array_type) %>%
-                as.data.frame(stringsAsFactors = FALSE) %>%
-                dplyr::mutate(
-                    ProbeID = rownames(.),
-                    seqnames = as.character(seqnames),
-                    strand = as.character(strand)
-                ) %>%
-                dplyr::mutate(
-                    ProbeName = ifelse(
-                        grepl("_", ProbeID),
-                        gsub("_(?:[^_]*)$", "", ProbeID),
-                        ProbeID
-                    )
-                ) %>%
-                dplyr::rename(
-                    Chromosome = seqnames,
-                    Start = start,
-                    End = end,
-                    Strand = strand
-                ) %>%
-                dplyr::filter(Chromosome != "*") %>%
-                dplyr::select(ProbeID, ProbeName, Chromosome, Start, End, Strand)
+                },
+                BPPARAM = bp
+            )
+        )
+        betas <- safe_colnames(betas, sample_ids)
+        betas <- betas[!grepl("^ctl|^cgBK", rownames(betas)), , drop = FALSE]
+        write_matrix_tsv(betas, file.path(cfg$out_path, "beta_matrix.txt"))
+        rm(betas); gc(reset = TRUE)
+    }
+
+    logger::log_info("Creating post-QC collapsed beta matrix and per-sample QC-loss records...")
+    pre_qc_list <- list()
+    post_qc_list <- list()
+    qc_records <- list()
+
+    for (sample_id in sample_ids) {
+        sdf <- sdf_list[[sample_id]]
+        prepped <- sesame::prepSesame(
+            sdf,
+            prep = "QCDPB",
+            prep_args = list(P = list(pval.threshold = cfg$pval_threshold))
+        )
+
+        pre <- sesame::getBetas(prepped, mask = FALSE, collapseToPfx = TRUE)
+        post <- sesame::getBetas(prepped, mask = TRUE, collapseToPfx = TRUE)
+
+        pre <- pre[!grepl("^ctl|^cgBK", names(pre))]
+        post <- post[!grepl("^ctl|^cgBK", names(post))]
+
+        pre_qc_list[[sample_id]] <- pre
+        post_qc_list[[sample_id]] <- post
+
+        all_ids <- union(names(pre), names(post))
+        pre_aligned <- pre[all_ids]
+        post_aligned <- post[all_ids]
+        failed <- !is.na(pre_aligned) & is.na(post_aligned)
+        failed_ids <- all_ids[failed]
+
+        if (length(failed_ids) > 0) {
+            qc_records[[length(qc_records) + 1L]] <- data.table::data.table(
+                SampleID = sample_id,
+                ProbeID = failed_ids,
+                pre_qc_beta = as.numeric(pre_aligned[failed_ids]),
+                post_qc_beta = as.numeric(post_aligned[failed_ids])
+            )
         }
 
-        manifest_ann <- tryCatch(
-            array_utils.add_ewas_atlas_annotation(
-                manifest_ann,
-                probeid_col = "ProbeName"
-            ),
-            error = function(e) {
-                logger::log_warn(
-                    paste0("EWAS Atlas annotation was skipped: ", conditionMessage(e))
-                )
-                manifest_ann
-            }
-        )
-        manifest_ann <- tryCatch(
-            array_utils.add_closest_gene_annotation(
-                manifest_ann,
-                chr = "Chromosome",
-                start = "Start",
-                end = "End",
-                threads = threads
-            ),
-            error = function(e) {
-                logger::log_warn(
-                    paste0("Closest-gene annotation was skipped: ", conditionMessage(e))
-                )
-                manifest_ann
-            }
-        )
-        manifest_ann <- tryCatch(
-            array_utils.add_gene_detail_annotation(
-                manifest_ann,
-                geneid_col = "GeneID"
-            ),
-            error = function(e) {
-                logger::log_warn(
-                    paste0("Gene-detail annotation was skipped: ", conditionMessage(e))
-                )
-                manifest_ann
-            }
-        )
-        manifest_ann <- manifest_ann %>%
-            dplyr::select(-End) %>%
-            dplyr::rename(Position = Start)
+        rm(prepped, pre, post, pre_aligned, post_aligned); gc(reset = TRUE)
+    }
 
-        betas$row_num <- seq_len(nrow(betas))
-        betas_ann <- dplyr::right_join(manifest_ann, betas, by = "ProbeID") %>%
-            dplyr::arrange(row_num) %>%
-            dplyr::select(-row_num) %>%
-            dplyr::mutate(
-                dplyr::across(
-                    dplyr::all_of(colnames(manifest_ann)),
-                    ~ ifelse(is.na(.), "", .)
-                )
-            ) %>%
-            dplyr::mutate(
-                ProbeName = ifelse(
-                    grepl("_", ProbeID),
-                    gsub("_(?:[^_]*)$", "", ProbeID),
-                    ProbeID
-                )
+    all_post_ids <- sort(unique(unlist(lapply(post_qc_list, names), use.names = FALSE)))
+    collapsed_betas <- matrix(NA_real_, nrow = length(all_post_ids), ncol = length(sample_ids), dimnames = list(all_post_ids, sample_ids))
+    for (sample_id in sample_ids) {
+        v <- post_qc_list[[sample_id]]
+        collapsed_betas[names(v), sample_id] <- as.numeric(v)
+    }
+    write_matrix_tsv(collapsed_betas, file.path(cfg$out_path, "collapsed_beta_matrix.txt"))
+
+    pre_ids <- sort(unique(unlist(lapply(pre_qc_list, names), use.names = FALSE)))
+    post_ids <- sort(unique(unlist(lapply(post_qc_list, names), use.names = FALSE)))
+    write_lines_gz(pre_ids, file.path(cfg$out_path, "pre_qc_collapsed_probe_ids.txt.gz"))
+    write_lines_gz(post_ids, file.path(cfg$out_path, "post_qc_collapsed_probe_ids.txt.gz"))
+
+    if (length(qc_records) > 0) {
+        qc_by_sample <- data.table::rbindlist(qc_records, use.names = TRUE, fill = TRUE)
+    } else {
+        qc_by_sample <- data.table::data.table(SampleID = character(), ProbeID = character(), pre_qc_beta = numeric(), post_qc_beta = numeric())
+    }
+    data.table::fwrite(qc_by_sample, file.path(cfg$out_path, "qc_probe_failures_by_sample.tsv.gz"), sep = "\t", quote = FALSE, row.names = FALSE, na = "NA", compress = "gzip")
+
+    if (nrow(qc_by_sample) > 0) {
+        qc_summary <- qc_by_sample[, .(qc_failed_samples = data.table::uniqueN(SampleID)), by = ProbeID]
+        qc_summary[, n_samples := length(sample_ids)]
+        qc_summary[, qc_failed_fraction := qc_failed_samples / n_samples]
+        qc_summary[, present_before_qc := ProbeID %in% pre_ids]
+        qc_summary[, present_after_qc := ProbeID %in% post_ids]
+        qc_summary[, qc_completely_lost := !(ProbeID %in% post_ids)]
+        qc_summary[, qc_partially_affected := (ProbeID %in% post_ids)]
+    } else {
+        qc_summary <- data.table::data.table(
+            ProbeID = character(), qc_failed_samples = integer(), n_samples = integer(),
+            qc_failed_fraction = numeric(), present_before_qc = logical(),
+            present_after_qc = logical(), qc_completely_lost = logical(), qc_partially_affected = logical()
+        )
+    }
+    data.table::fwrite(qc_summary, file.path(cfg$out_path, "qc_probe_failures.tsv.gz"), sep = "\t", quote = FALSE, row.names = FALSE, na = "NA", compress = "gzip")
+
+    batch_summary <- data.table::data.table(
+        dataset = cfg$array_type,
+        batch = basename(normalizePath(cfg$out_path, mustWork = FALSE)),
+        n_samples = length(sample_ids),
+        pval_threshold = cfg$pval_threshold,
+        n_pre_qc_collapsed_cpgs = length(pre_ids),
+        n_post_qc_collapsed_cpgs = length(post_ids),
+        n_qc_affected_cpgs = data.table::uniqueN(qc_summary$ProbeID),
+        n_qc_completely_lost_cpgs = sum(qc_summary$qc_completely_lost),
+        n_qc_partially_affected_cpgs = sum(qc_summary$qc_partially_affected),
+        n_qc_failed_sample_cpg_pairs = nrow(qc_by_sample)
+    )
+    data.table::fwrite(batch_summary, file.path(cfg$out_path, "qc_batch_summary.csv"), quote = FALSE, row.names = FALSE)
+
+    if (cfg$save_detection_pvals) {
+        logger::log_info("Creating optional detection p-value matrix...")
+        pvals <- do.call(
+            cbind,
+            BiocParallel::bplapply(
+                sdf_list,
+                function(sdf) sesame::pOOBAH(sesame::dyeBiasNL(sesame::inferInfiniumIChannel(sdf)), return.pval = TRUE),
+                BPPARAM = bp
             )
-
-        data.table::fwrite(
-            betas_ann,
-            file.path(out_path, "beta_matrix_ann.txt"),
-            sep = "	",
-            quote = FALSE,
-            row.names = FALSE,
-            na = "NA"
         )
-        rm(betas, betas_ann)
-        gc(reset = TRUE)
-    } else {
-        logger::log_info("Skipping annotated beta matrix creation because skip_annotation=TRUE.")
-        if (!is.null(betas)) {
-            rm(betas)
-            gc(reset = TRUE)
-        }
+        pvals <- safe_colnames(pvals, sample_ids)
+        pvals <- pvals[!grepl("^ctl|^cgBK", rownames(pvals)), , drop = FALSE]
+        write_matrix_tsv(pvals, file.path(cfg$out_path, "detection_pvals.txt"))
+        rm(pvals); gc(reset = TRUE)
     }
 
-    ########################################
-    # Suffix-collapsed post-QCDPB beta matrix and QC probe-loss report
-    ########################################
-    logger::log_info("Creating the suffix-collapsed beta matrix...")
-    collapsed_beta_vectors <- BiocParallel::bplapply(
-        sdf_list,
-        function(sdf) {
-            processed <- sesame::prepSesame(
-                sdf,
-                prep = "QCDPB",
-                prep_args = list(P = list(pval.threshold = pval_threshold))
-            )
-            sesame::getBetas(
-                processed,
-                mask = TRUE,
-                collapseToPfx = TRUE,
-                collapseMethod = "mean"
-            )
-        },
-        BPPARAM = bp
-    )
-    collapsed_betas_matrix <- matrix_from_named_vectors(
-        collapsed_beta_vectors,
-        sample_names,
-        "suffix-collapsed beta matrix"
-    )
-    collapsed_betas_matrix <- collapsed_betas_matrix[
-        !grepl("^ctl|^cgBK", rownames(collapsed_betas_matrix)),
-        ,
-        drop = FALSE
-    ]
+    if (cfg$save_intensity) {
+        logger::log_info("Creating optional methylated/unmethylated intensity matrices...")
+        meth_intensity <- do.call(cbind, BiocParallel::bplapply(sdf_list, function(sdf) {
+            sig <- sesame::signalMU(sdf); setNames(sig$M, sig$Probe_ID)
+        }, BPPARAM = bp))
+        meth_intensity <- safe_colnames(meth_intensity, sample_ids)
+        meth_intensity <- meth_intensity[!grepl("^ctl|^cgBK", rownames(meth_intensity)), , drop = FALSE]
+        write_matrix_tsv(meth_intensity, file.path(cfg$out_path, "methylated_intensity.txt"))
+        rm(meth_intensity); gc(reset = TRUE)
 
-    write_qc_probe_reports(
-        sdf_list = sdf_list,
-        collapsed_betas_matrix = collapsed_betas_matrix,
-        sample_names = sample_names,
-        out_path = out_path,
-        array_type = array_type,
-        pval_threshold = pval_threshold
-    )
-
-    collapsed_betas <- write_matrix_tsv(
-        collapsed_betas_matrix,
-        file.path(out_path, "collapsed_beta_matrix.txt")
-    )
-    rm(collapsed_beta_vectors, collapsed_betas_matrix)
-    gc(reset = TRUE)
-
-    ########################################
-    # Optional annotation for suffix-collapsed beta matrix
-    ########################################
-    if (!skip_annotation) {
-        logger::log_info("Creating the annotated suffix-collapsed beta matrix...")
-        collapsed_manifest_ann <- manifest_ann %>%
-            dplyr::distinct(ProbeName, .keep_all = TRUE)
-        collapsed_betas$row_num <- seq_len(nrow(collapsed_betas))
-        collapsed_betas_ann <- dplyr::right_join(
-            collapsed_manifest_ann,
-            collapsed_betas,
-            by = c("ProbeName" = "ProbeID")
-        ) %>%
-            dplyr::arrange(row_num) %>%
-            dplyr::select(-row_num) %>%
-            dplyr::mutate(
-                dplyr::across(
-                    dplyr::all_of(colnames(collapsed_manifest_ann)),
-                    ~ ifelse(is.na(.), "", .)
-                )
-            ) %>%
-            dplyr::select(-ProbeID) %>%
-            dplyr::rename(ProbeID = ProbeName)
-
-        data.table::fwrite(
-            collapsed_betas_ann,
-            file.path(out_path, "collapsed_beta_matrix_ann.txt"),
-            sep = "\t",
-            quote = FALSE,
-            row.names = FALSE,
-            na = "NA"
-        )
-        rm(collapsed_betas, collapsed_betas_ann)
-        gc(reset = TRUE)
-    } else {
-        logger::log_info(
-            "Skipping annotated suffix-collapsed beta matrix creation because skip_annotation=TRUE."
-        )
-        rm(collapsed_betas)
-        gc(reset = TRUE)
+        unmeth_intensity <- do.call(cbind, BiocParallel::bplapply(sdf_list, function(sdf) {
+            sig <- sesame::signalMU(sdf); setNames(sig$U, sig$Probe_ID)
+        }, BPPARAM = bp))
+        unmeth_intensity <- safe_colnames(unmeth_intensity, sample_ids)
+        unmeth_intensity <- unmeth_intensity[!grepl("^ctl|^cgBK", rownames(unmeth_intensity)), , drop = FALSE]
+        write_matrix_tsv(unmeth_intensity, file.path(cfg$out_path, "unmethylated_intensity.txt"))
+        rm(unmeth_intensity); gc(reset = TRUE)
     }
-
-    ########################################
-    # Optional detection p-value matrix corresponding to the Q-C-D-P sequence
-    ########################################
-    if (save_detection_pvals) {
-        logger::log_info("Creating the p-value matrix...")
-        pval_vectors <- BiocParallel::bplapply(
-            sdf_list,
-            function(sdf) {
-                qcd <- sesame::prepSesame(sdf, prep = "QCD")
-                sesame::pOOBAH(qcd, return.pval = TRUE)
-            },
-            BPPARAM = bp
-        )
-        pvals_matrix <- matrix_from_named_vectors(
-            pval_vectors,
-            sample_names,
-            "detection p-value matrix"
-        )
-        pvals_matrix <- pvals_matrix[
-            !grepl("^ctl|^cgBK", rownames(pvals_matrix)),
-            ,
-            drop = FALSE
-        ]
-        write_matrix_tsv(pvals_matrix, file.path(out_path, "detection_pvals.txt"))
-        rm(pval_vectors, pvals_matrix)
-        gc(reset = TRUE)
-    } else {
-        logger::log_info("Skipping detection p-value matrix creation because save_detection_pvals=FALSE.")
-    }
-
-    ########################################
-    # Optional methylated/unmethylated-intensity matrices
-    ########################################
-    if (save_intensity) {
-        logger::log_info("Creating the methylated-intensity matrix...")
-        meth_vectors <- BiocParallel::bplapply(
-            sdf_list,
-            function(sdf) {
-                sig_mu <- sesame::signalMU(sdf)
-                stats::setNames(sig_mu$M, sig_mu$Probe_ID)
-            },
-            BPPARAM = bp
-        )
-        meth_matrix <- matrix_from_named_vectors(
-            meth_vectors,
-            sample_names,
-            "methylated-intensity matrix"
-        )
-        meth_matrix <- meth_matrix[
-            !grepl("^ctl|^cgBK", rownames(meth_matrix)),
-            ,
-            drop = FALSE
-        ]
-        write_matrix_tsv(meth_matrix, file.path(out_path, "methylated_intensity.txt"))
-        rm(meth_vectors, meth_matrix)
-        gc(reset = TRUE)
-
-        logger::log_info("Creating the unmethylated-intensity matrix...")
-        unmeth_vectors <- BiocParallel::bplapply(
-            sdf_list,
-            function(sdf) {
-                sig_mu <- sesame::signalMU(sdf)
-                stats::setNames(sig_mu$U, sig_mu$Probe_ID)
-            },
-            BPPARAM = bp
-        )
-        unmeth_matrix <- matrix_from_named_vectors(
-            unmeth_vectors,
-            sample_names,
-            "unmethylated-intensity matrix"
-        )
-        unmeth_matrix <- unmeth_matrix[
-            !grepl("^ctl|^cgBK", rownames(unmeth_matrix)),
-            ,
-            drop = FALSE
-        ]
-        write_matrix_tsv(
-            unmeth_matrix,
-            file.path(out_path, "unmethylated_intensity.txt")
-        )
-        rm(unmeth_vectors, unmeth_matrix)
-        gc(reset = TRUE)
-    } else {
-        logger::log_info("Skipping methylated/unmethylated-intensity matrix creation because save_intensity=FALSE.")
-    }
-
-    rm(sdf_list)
-    gc(reset = TRUE)
 
     logger::log_info("Finish!")
 }
 
-if (sys.nframe() == 0L) {
-    main()
-}
+main()
